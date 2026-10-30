@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ghostface Real-Time Voice Changer</title>
+    <style>
+        body { font-family: 'Courier New', Courier, monospace; text-align: center; padding-top: 50px; background-color: #0a0a0a; color: #fff; }
+        .container { max-width: 500px; margin: 0 auto; border: 2px solid #e50914; padding: 30px; border-radius: 10px; box-shadow: 0 0 15px rgba(229, 9, 20, 0.4); }
+        h1 { color: #e50914; text-transform: uppercase; letter-spacing: 2px; }
+        button { padding: 15px 30px; font-size: 18px; cursor: pointer; background-color: #e50914; color: white; border: none; border-radius: 5px; font-weight: bold; transition: 0.3s; margin: 10px; }
+        button:hover { background-color: #b20710; box-shadow: 0 0 10px #e50914; }
+        button:disabled { background-color: #333; color: #777; cursor: not-allowed; box-shadow: none; }
+        #status { margin-top: 20px; font-size: 1.1em; color: #aaa; }
+        .slider-container { margin: 25px 0; text-align: left; }
+        label { display: block; margin-bottom: 5px; color: #e50914; }
+        input[type=range] { width: 100%; accent-color: #e50914; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Ghostface Voice</h1>
+        <p>Collega le cuffie prima di iniziare per evitare il fischio dell'effetto Larsen (feedback)!</p>
+        
+        <button id="startBtn">ATTIVA MICROFONO</button>
+        <button id="stopBtn" disabled>SPEGNI</button>
+        
+        <div class="slider-container">
+            <label for="pitchSlider">Profondità Voce (Pitch Shift): <span id="pitchVal">0.60</span></label>
+            <input type="range" id="pitchSlider" min="0.4" max="0.9" step="0.05" value="0.60">
+        </div>
+
+        <div id="status">Stato: Pronto.</div>
+    </div>
+
+    <script>
+        let audioCtx = null;
+        let stream = null;
+        let source = null;
+        let processor = null;
+        let filter = null;
+        let delay = null;
+        let delayGain = null;
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('status');
+        const pitchSlider = document.getElementById('pitchSlider');
+        const pitchVal = document.getElementById('pitchVal');
+
+        let pitchRatio = parseFloat(pitchSlider.value);
+
+        pitchSlider.addEventListener('input', (e) => {
+            pitchRatio = parseFloat(e.target.value);
+            pitchVal.innerText = pitchRatio.toFixed(2);
+        });
+
+        startBtn.addEventListener('click', async () => {
+            try {
+                // 1. Richiedi l'accesso al microfono
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: true,
+                        autoGainControl: false
+                    } 
+                });
+
+                // 2. Inizializza il contesto Audio
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                source = audioCtx.createMediaStreamSource(stream);
+
+                // 3. Crea il filtro Passa-Basso (taglia i toni acuti, rende cupo)
+                filter = audioCtx.createBiquadFilter();
+                filter.type = "lowpass";
+                filter.frequency.value = 1200; // Taglia sopra i 1200Hz
+
+                // 4. Crea l'effetto Eco/Riverbero leggero
+                delay = audioCtx.createDelay();
+                delay.delayTime.value = 0.04; // 40 millisecondi di ritardo
+                delayGain = audioCtx.createGain();
+                delayGain.gain.value = 0.3;   // Volume dell'eco
+
+                // 5. Crea il Pitch Shifter personalizzato (Algoritmo base a finestra)
+                const bufferSize = 2048;
+                processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+                
+                // Variabili per l'algoritmo di pitch shift temporale
+                let grainWindow = new Float32Array(bufferSize);
+                for (let i = 0; i < bufferSize; i++) {
+                    grainWindow[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (bufferSize - 1)));
+                }
+
+                processor.onaudioprocess = (audioProcessingEvent) => {
+                    const inputBuffer = audioProcessingEvent.inputBuffer;
+                    const outputBuffer = audioProcessingEvent.outputBuffer;
+                    const inputData = inputBuffer.getChannelData(0);
+                    const outputData = outputBuffer.getChannelData(0);
+
+                    // Semplice algoritmo di ricampionamento lineare per modificare l'intonazione
+                    for (let i = 0; i < outputBuffer.length; i++) {
+                        let readIndex = i * pitchRatio;
+                        let baseIndex = Math.floor(readIndex);
+                        let frac = readIndex - baseIndex;
+                        
+                        if (baseIndex + 1 < inputData.length) {
+                            // Interpolazione lineare tra due campioni adiacenti
+                            outputData[i] = (1 - frac) * inputData[baseIndex] + frac * inputData[baseIndex + 1];
+                        } else {
+                            outputData[i] = inputData[inputData.length - 1];
+                        }
+                        
+                        // Applica la finestra per ridurre i clic digitali
+                        outputData[i] *= grainWindow[i % bufferSize];
+                    }
+                };
+
+                // 6. Connessioni della catena audio:
+                // Mic -> Filtro Passa-Basso -> Pitch Shifter -> Casse
+                source.connect(filter);
+                filter.connect(processor);
+                processor.connect(audioCtx.destination);
+
+                // Catena dell'eco (collegata in parallelo all'output del processor)
+                processor.connect(delay);
+                delay.connect(delayGain);
+                delayGain.connect(audioCtx.destination);
+
+                statusDiv.innerText = "Stato: Licantropo/Ghostface ATTIVO! Parla al microfono.";
+                statusDiv.style.color = "#00ff00";
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+
+            } catch (err) {
+                console.error("Impossibile accedere al microfono:", err);
+                statusDiv.innerText = "Errore: Permesso microfono negato o non supportato.";
+                statusDiv.style.color = "#ff0000";
+            }
+        });
+
+        stopBtn.addEventListener('click', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+            if (audioCtx) {
+                audioCtx.close();
+            }
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusDiv.innerText = "Stato: Spento.";
+            statusDiv.style.color = "#aaa";
+        });
+    </script>
+</body>
+</html>
